@@ -1,0 +1,213 @@
+﻿@page "/"
+@using System.Text
+@using System.Globalization
+@using Microsoft.JSInterop
+@inject IJSRuntime JS
+@inject NavigationManager NavigationManager
+
+<h3>Base Logic Input</h3>
+
+@if (!isBaseLogicSubmitted)
+{
+    <div>
+        <p><strong>Instructions:</strong></p>
+        <ol>
+            <li>Input every line that should be repeated and press Next.</li>
+            <li>If using the GUI, highlight only the lines that need to be repeated, then press Copy or Ctrl + C, paste into the box, and press Next.</li>
+        </ol>
+
+        <textarea @bind="baseLogic" rows="5" cols="60" placeholder="Enter Base Logic String"></textarea>
+        <br />
+        <button @onclick="SubmitBaseLogic">Next</button>
+    </div>
+}
+else if (!isConfigurationSubmitted)
+{
+    <h3>Configure Hex Addresses</h3>
+    <div>
+        <p><strong>Instructions:</strong></p>
+        <ol>
+            <li>Enter the number of iterations. This tool generates from the second iteration onward, so you may need one less than expected.</li>
+            <li>Choose an offset per address. Ensure matching addresses have the same offset and correctly mark any bit increments.</li>
+        </ol>
+
+        <label>Number of Iterations:</label>
+        <input type="number" @bind="iterations" min="1" />
+    </div>
+
+    @foreach (var input in dynamicAddressInputs)
+    {
+        <div style="margin-top:10px;">
+            <label>@($"Address {input.Index}: {input.HexAddress}")</label>
+            @if (input.ShowTypeSelection)
+            {
+                <select @bind="input.SelectedType">
+                    <option value="address">Address</option>
+                    <option value="bit">Bit</option>
+                </select>
+            }
+            <input type="text" placeholder="Offset" @bind="input.OffsetText" />
+        </div>
+    }
+
+    <br />
+    <button @onclick="GenerateOutput">Generate</button>
+}
+else
+{
+    <h3>Final Output</h3>
+    <div>
+        <p><strong>Instructions:</strong></p>
+        <ol>
+            <li>Use the Copy Text button and paste it back into the GUI.</li>
+            <li>Reset if you need to build another chain.</li>
+        </ol>
+
+        <textarea @bind="finalOutput" rows="10" cols="60" readonly></textarea>
+    </div>
+    <br />
+    <button @onclick="CopyOutput">Copy Text</button>
+    <button @onclick="ResetState">Reset</button>
+}
+
+@code {
+    private bool isBaseLogicSubmitted = false;
+    private bool isConfigurationSubmitted = false;
+    private string baseLogic = "";
+    private int iterations = 1;
+    private string finalOutput = "";
+    private char[] prefixArray = new char[] { 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T' };
+
+    public class AddressInput
+    {
+        public int Index { get; set; }
+        public string HexAddress { get; set; } = string.Empty;
+        public bool ShowTypeSelection { get; set; }
+        public string SelectedType { get; set; } = "address";
+        public string OffsetText { get; set; } = "0";
+    }
+
+    private List<AddressInput> dynamicAddressInputs = new();
+
+    private void SubmitBaseLogic()
+    {
+        if (string.IsNullOrWhiteSpace(baseLogic))
+            return;
+
+        dynamicAddressInputs.Clear();
+        int idx = 1;
+        int index = 0;
+
+        while (index < baseLogic.Length)
+        {
+            int found = baseLogic.IndexOf("0x", index, StringComparison.OrdinalIgnoreCase);
+            if (found == -1) break;
+
+            int pos = found + 2;
+            string prefix = "";
+
+            if (pos < baseLogic.Length)
+            {
+                char candidate = baseLogic[pos];
+                if (char.IsDigit(candidate) || char.IsWhiteSpace(candidate))
+                {
+                    prefix = "";
+                    while (pos < baseLogic.Length && char.IsWhiteSpace(baseLogic[pos]))
+                        pos++;
+                }
+                else
+                {
+                    prefix = candidate.ToString();
+                    pos++;
+                }
+            }
+
+            StringBuilder sb = new();
+            while (pos < baseLogic.Length && sb.Length < 8 && Uri.IsHexDigit(baseLogic[pos]))
+            {
+                sb.Append(baseLogic[pos]);
+                pos++;
+            }
+
+            if (sb.Length > 0)
+            {
+                string canonicalHex = string.IsNullOrEmpty(prefix) ? $"0x{sb}" : $"0x{prefix}{sb}";
+
+                bool showTypeSelection = !string.IsNullOrEmpty(prefix) && prefix[0] >= 'M' && prefix[0] <= 'T';
+
+                dynamicAddressInputs.Add(new AddressInput
+                    {
+                        Index = idx++,
+                        HexAddress = canonicalHex,
+                        ShowTypeSelection = showTypeSelection
+                    });
+            }
+
+            index = pos;
+        }
+
+        isBaseLogicSubmitted = true;
+    }
+
+    private void GenerateOutput()
+    {
+        if (iterations < 1) return;
+
+        List<string> originalHexes = dynamicAddressInputs.Select(ai => ai.HexAddress).ToList();
+        List<string> types = dynamicAddressInputs.Select(ai => ai.SelectedType.ToLower()).ToList();
+        List<int> offsets = dynamicAddressInputs.Select(ai => int.TryParse(ai.OffsetText, out int off) ? off : 0).ToList();
+        List<char> currentPrefixes = dynamicAddressInputs.Select(ai => ai.HexAddress[2]).ToList();
+        List<int> currentAddresses = dynamicAddressInputs.Select(ai =>
+        {
+            string hexDigits = ai.ShowTypeSelection ? ai.HexAddress[3..] : ai.HexAddress[2..];
+            return int.Parse(hexDigits, NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+        }).ToList();
+
+        var iterationResults = new List<(int iteration, string updatedLogic)>();
+        string currentLogic = baseLogic;
+
+        for (int i = 0; i < iterations; i++)
+        {
+            string iterString = currentLogic;
+            for (int j = 0; j < originalHexes.Count; j++)
+            {
+                if (types[j] == "bit")
+                {
+                    int bitIndex = Array.IndexOf(prefixArray, currentPrefixes[j]);
+                    for (int k = 0; k < offsets[j]; k++)
+                    {
+                        bitIndex = (bitIndex + 1) % 8;
+                        if (bitIndex == 0) currentAddresses[j]++;
+                    }
+                    currentPrefixes[j] = prefixArray[bitIndex];
+                }
+                else
+                {
+                    currentAddresses[j] += offsets[j];
+                }
+
+                string newHex = $"0x{currentPrefixes[j]}{currentAddresses[j]:X8}";
+                iterString = iterString.Replace(originalHexes[j], newHex);
+                originalHexes[j] = newHex;
+            }
+            iterationResults.Add((i, iterString));
+            currentLogic = iterString;
+        }
+
+        finalOutput = string.Join("_", iterationResults.Select(t => t.updatedLogic));
+        isConfigurationSubmitted = true;
+    }
+
+    private async Task CopyOutput() =>
+        await JS.InvokeVoidAsync("navigator.clipboard.writeText", finalOutput);
+
+    private void ResetState()
+    {
+        baseLogic = "";
+        iterations = 1;
+        finalOutput = "";
+        isBaseLogicSubmitted = false;
+        isConfigurationSubmitted = false;
+        dynamicAddressInputs.Clear();
+    }
+}
